@@ -1,6 +1,8 @@
-import React, { useMemo, useState } from 'react';
-import { Plus, Trash2, Download, Link2, Calculator, ShieldAlert } from 'lucide-react';
+import React, { useMemo, useState, useEffect } from 'react';
+import { Plus, Trash2, Download, Link2, Calculator, ShieldAlert, Save } from 'lucide-react';
 import { exportSolutionsToExcel } from '../services/exportService';
+import { supabase } from '../services/supabase';
+import { useSearchParams } from 'react-router-dom';
 
 type ProductType = 'EDR' | 'SIEM' | 'NDR' | 'CUSTOM';
 
@@ -40,6 +42,13 @@ const DEFAULT_CATALOG: Record<ProductType, { name: string; unitMsrp: number; mar
 const uuid = () => (crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
 
 export default function SolutionsCalculator() {
+  const [searchParams] = useSearchParams();
+  const existingProposalId = searchParams.get('proposalId');
+
+  const [loadedProposal, setLoadedProposal] = useState<any>(null);
+  const [isLocked, setIsLocked] = useState(false);
+
+  const [client, setClient] = useState('');
   const [termMonths, setTermMonths] = useState(12);
   const [billingFrequency, setBillingFrequency] = useState<'Monthly' | 'Quarterly' | 'Annual'>('Monthly');
 
@@ -50,11 +59,57 @@ export default function SolutionsCalculator() {
   const [newType, setNewType] = useState<ProductType>('EDR');
   const [newVariantIndex, setNewVariantIndex] = useState(0);
 
-  const [items, setItems] = useState<LineItem[]>([
-    // Start empty or seed with one line
-  ]);
+  const [items, setItems] = useState<LineItem[]>([]);
+
+  const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+
+  /* ======================
+     LOAD EXISTING (EDIT MODE)
+  ====================== */
+
+  useEffect(() => {
+    const loadExisting = async () => {
+      if (!existingProposalId) return;
+
+      const { data, error } = await supabase
+        .from('proposals')
+        .select('*')
+        .eq('id', existingProposalId)
+        .single();
+
+      if (error || !data) {
+        console.error('Failed to load proposal for edit:', error);
+        return;
+      }
+
+      setLoadedProposal(data);
+
+      const locked =
+        data.locked === true ||
+        data.status === 'approved' ||
+        data.status === 'pending_approval';
+
+      setIsLocked(locked);
+
+      const d = data.data || {};
+
+      setClient(d.client?.name || '');
+      setTermMonths(d.inputs?.termMonths ?? 12);
+      setBillingFrequency(d.inputs?.billingFrequency ?? 'Monthly');
+      setGlobalDiscount(d.inputs?.globalDiscount ?? 0);
+
+      // Restore line items
+      if (Array.isArray(d.items)) {
+        setItems(d.items);
+      }
+    };
+
+    loadExisting();
+  }, [existingProposalId]);
 
   const addLine = () => {
+    if (isLocked) return;
     const variant = DEFAULT_CATALOG[newType][newVariantIndex] ?? DEFAULT_CATALOG[newType][0];
     const base: LineItem = {
       id: uuid(),
@@ -75,9 +130,13 @@ export default function SolutionsCalculator() {
     setItems(prev => [...prev, base]);
   };
 
-  const removeLine = (id: string) => setItems(prev => prev.filter(x => x.id !== id));
+  const removeLine = (id: string) => {
+    if (isLocked) return;
+    setItems(prev => prev.filter(x => x.id !== id));
+  };
 
   const updateLine = (id: string, patch: Partial<LineItem>) => {
+    if (isLocked) return;
     setItems(prev => prev.map(x => (x.id === id ? { ...x, ...patch } : x)));
   };
 
@@ -123,12 +182,124 @@ export default function SolutionsCalculator() {
     const oneTime = lines.reduce((s, l) => s + (l.oneTimeOnboarding || 0), 0);
 
     const tcv = recurringMonthly * termMonths + oneTime;
+    const yearly = recurringMonthly * 12;
 
-    return { lines, recurringMonthly, oneTime, tcv };
+    return { lines, recurringMonthly, oneTime, tcv, yearly };
   }, [items, termMonths, globalDiscount]);
+
+  /* ======================
+     BUILD LINE ITEMS FOR DB
+  ====================== */
+
+  const buildLineItems = () => {
+    return pricing.lines.map(l => ({
+      category: l.type,
+      description: l.name,
+      metric: `${l.units} ${lineUnitLabel(l.type)}`,
+      unit_price: l.unitMsrp,
+      extended_monthly: l.discountedMonthly,
+      extended_onetime: l.oneTimeOnboarding || 0,
+      billing: 'monthly',
+      sku: l.sku || null,
+      resellerMarginPct: l.resellerMarginPct,
+      customerDiscountPct: l.customerDiscountPct,
+    }));
+  };
+
+  /* ======================
+     SAVE HANDLER
+  ====================== */
+
+  const handleSave = async () => {
+    if (isLocked) return;
+
+    setSaving(true);
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setSaving(false);
+      alert('Not authenticated');
+      return;
+    }
+
+    const payloadData = {
+      calculator: 'solutions_calculator',
+      client: { name: client || null },
+      inputs: {
+        termMonths,
+        billingFrequency,
+        globalDiscount,
+      },
+      items: items, // Store raw items for edit restoration
+      pricing: {
+        baseMonthly: pricing.recurringMonthly,
+        monthly: pricing.recurringMonthly,
+        yearly: pricing.yearly,
+        oneTime: pricing.oneTime,
+        total: pricing.tcv,
+      },
+      maturity: 'SOLUTIONS',
+      maturity_summary: {
+        level: 'Custom Solutions Package',
+        tier: 'SOLUTIONS',
+      },
+      line_items: buildLineItems(),
+      service_package: {
+        tier: 'SOLUTIONS',
+        maturity_label: 'Custom Solutions Package',
+        inclusions: items.map(i => i.name),
+      },
+      onboarding: {
+        steps: ['Discovery', 'Solution Design', 'Implementation', 'Testing', 'Go Live'],
+        fee: pricing.oneTime,
+      },
+    };
+
+    let error: any = null;
+
+    if (existingProposalId) {
+      const resp = await supabase
+        .from('proposals')
+        .update({ data: payloadData })
+        .eq('id', existingProposalId);
+
+      error = resp.error;
+    } else {
+      const proposalId = crypto.randomUUID();
+      const resp = await supabase.from('proposals').insert([{
+        id: proposalId,
+        user_id: user.id,
+        status: 'draft',
+        calculator_type: 'solutions',
+        tags: ['Solutions'],
+        data: payloadData,
+      }]);
+
+      error = resp.error;
+    }
+
+    setSaving(false);
+
+    if (error) {
+      console.error(error);
+      setSaveStatus('Failed to save proposal');
+      return;
+    }
+
+    setSaveStatus('Proposal saved!');
+    setTimeout(() => setSaveStatus(null), 3000);
+  };
 
   return (
     <div className="max-w-6xl mx-auto pb-24 space-y-12">
+
+      {/* Locked Banner */}
+      {isLocked && (
+        <div className="bg-orange-100 border border-orange-300 text-orange-800 px-6 py-4 rounded-2xl font-bold">
+          This proposal is locked ({loadedProposal?.status}). Editing is disabled.
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-col md:flex-row justify-between gap-4 items-start">
         <div>
@@ -136,40 +307,80 @@ export default function SolutionsCalculator() {
           <p className="text-slate-500 mt-2">
             Build a bespoke offer by mixing EDR, SIEM, NDR and optional services. Export as a proposal-ready sheet.
           </p>
+          {existingProposalId && (
+            <p className="text-xs text-slate-400 mt-1">
+              Editing Proposal: {existingProposalId}
+            </p>
+          )}
         </div>
 
-        <button
-          onClick={() =>
-            exportSolutionsToExcel({
-              termMonths,
-              billingFrequency,
-              globalDiscount,
-              items: pricing.lines.map(l => ({
-                type: l.type,
-                name: l.name,
-                sku: l.sku || '',
-                units: l.units,
-                unitLabel: lineUnitLabel(l.type),
-                unitMsrp: l.unitMsrp,
-                resellerMarginPct: l.resellerMarginPct,
-                lineDiscountPct: l.customerDiscountPct,
-                globalDiscountPct: globalDiscount,
-                listMonthly: l.sellListMonthly,
-                customerMonthly: l.discountedMonthly,
-                oneTimeOnboarding: l.oneTimeOnboarding || 0,
-              })),
-              totals: {
-                recurringMonthly: pricing.recurringMonthly,
-                oneTime: pricing.oneTime,
-                tcv: pricing.tcv,
-              },
-            })
-          }
-          className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-xl font-bold text-sm shadow-lg shadow-emerald-900/20 active:scale-95"
-        >
-          <Download size={18} />
-          Export Proposal
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={handleSave}
+            disabled={saving || isLocked}
+            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white px-5 py-2.5 rounded-xl font-bold text-sm shadow-lg shadow-blue-900/20 active:scale-95"
+          >
+            <Save size={18} />
+            {saving ? 'Saving...' : existingProposalId ? 'Update Proposal' : 'Save as Draft'}
+          </button>
+
+          <button
+            onClick={() =>
+              exportSolutionsToExcel({
+                termMonths,
+                billingFrequency,
+                globalDiscount,
+                items: pricing.lines.map(l => ({
+                  type: l.type,
+                  name: l.name,
+                  sku: l.sku || '',
+                  units: l.units,
+                  unitLabel: lineUnitLabel(l.type),
+                  unitMsrp: l.unitMsrp,
+                  resellerMarginPct: l.resellerMarginPct,
+                  lineDiscountPct: l.customerDiscountPct,
+                  globalDiscountPct: globalDiscount,
+                  listMonthly: l.sellListMonthly,
+                  customerMonthly: l.discountedMonthly,
+                  oneTimeOnboarding: l.oneTimeOnboarding || 0,
+                })),
+                totals: {
+                  recurringMonthly: pricing.recurringMonthly,
+                  oneTime: pricing.oneTime,
+                  tcv: pricing.tcv,
+                },
+              })
+            }
+            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-xl font-bold text-sm shadow-lg shadow-emerald-900/20 active:scale-95"
+          >
+            <Download size={18} />
+            Export
+          </button>
+        </div>
+      </div>
+
+      {saveStatus && (
+        <div className="bg-green-100 border border-green-300 text-green-800 px-4 py-2 rounded-xl font-bold text-sm">
+          {saveStatus}
+        </div>
+      )}
+
+      {/* Client Name */}
+      <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6">
+        <div className="flex items-center gap-2 text-blue-600 font-bold uppercase tracking-widest text-sm mb-4">
+          <ShieldAlert size={16} /> Client Information
+        </div>
+        <div>
+          <label className="text-xs font-bold uppercase text-slate-500">Client Name</label>
+          <input
+            type="text"
+            value={client}
+            onChange={(e) => setClient(e.target.value)}
+            disabled={isLocked}
+            placeholder="Enter client name..."
+            className="mt-2 w-full max-w-md rounded-xl border border-slate-200 px-4 py-3 font-semibold disabled:bg-slate-100"
+          />
+        </div>
       </div>
 
       {/* Quick Links (combined offer flow) */}
@@ -206,9 +417,9 @@ export default function SolutionsCalculator() {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <Select label="Contract Term (Months)" value={termMonths} onChange={setTermMonths} options={[12, 36, 60]} />
-          <Select label="Billing Frequency" value={billingFrequency} onChange={setBillingFrequency} options={['Monthly', 'Quarterly', 'Annual']} />
-          <NumberInput label="Global Discount (%)" value={globalDiscount} onChange={setGlobalDiscount} />
+          <Select label="Contract Term (Months)" value={termMonths} onChange={setTermMonths} options={[12, 36, 60]} disabled={isLocked} />
+          <Select label="Billing Frequency" value={billingFrequency} onChange={setBillingFrequency} options={['Monthly', 'Quarterly', 'Annual']} disabled={isLocked} />
+          <NumberInput label="Global Discount (%)" value={globalDiscount} onChange={setGlobalDiscount} disabled={isLocked} />
         </div>
       </div>
 
@@ -219,15 +430,20 @@ export default function SolutionsCalculator() {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <Select label="Type" value={newType} onChange={(v: ProductType) => { setNewType(v); setNewVariantIndex(0); }} options={['EDR', 'SIEM', 'NDR', 'CUSTOM']} />
+          <Select label="Type" value={newType} onChange={(v: ProductType) => { setNewType(v); setNewVariantIndex(0); }} options={['EDR', 'SIEM', 'NDR', 'CUSTOM']} disabled={isLocked} />
           <Select
             label="Product"
             value={newVariantIndex}
             onChange={setNewVariantIndex}
             options={DEFAULT_CATALOG[newType].map((p, idx) => ({ label: p.name, value: idx }))}
+            disabled={isLocked}
           />
           <div className="md:col-span-2 flex items-end">
-            <button onClick={addLine} className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 text-white rounded-xl font-bold">
+            <button
+              onClick={addLine}
+              disabled={isLocked}
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 text-white rounded-xl font-bold disabled:bg-slate-400"
+            >
               <Plus size={16} /> Add to proposal
             </button>
           </div>
@@ -256,7 +472,11 @@ export default function SolutionsCalculator() {
                     </p>
                   </div>
 
-                  <button onClick={() => removeLine(l.id)} className="text-red-500 hover:text-red-600 flex items-center gap-2 font-bold text-sm">
+                  <button
+                    onClick={() => removeLine(l.id)}
+                    disabled={isLocked}
+                    className="text-red-500 hover:text-red-600 flex items-center gap-2 font-bold text-sm disabled:opacity-50"
+                  >
                     <Trash2 size={16} /> Remove
                   </button>
                 </div>
@@ -271,14 +491,15 @@ export default function SolutionsCalculator() {
                       if (l.type === 'SIEM') updateLine(l.id, { gbPerDay: v });
                       if (l.type === 'NDR') updateLine(l.id, { sensors: v });
                     }}
+                    disabled={isLocked}
                   />
 
-                  <TextInput label="SKU (optional)" value={l.sku ?? ''} onChange={(v: string) => updateLine(l.id, { sku: v })} />
+                  <TextInput label="SKU (optional)" value={l.sku ?? ''} onChange={(v: string) => updateLine(l.id, { sku: v })} disabled={isLocked} />
 
-                  <NumberInput label="Unit MSRP (€ / mo)" value={l.unitMsrp} onChange={(v: number) => updateLine(l.id, { unitMsrp: v })} />
-                  <NumberInput label="Reseller Margin (%)" value={l.resellerMarginPct} onChange={(v: number) => updateLine(l.id, { resellerMarginPct: v })} />
-                  <NumberInput label="Line Discount (%)" value={l.customerDiscountPct} onChange={(v: number) => updateLine(l.id, { customerDiscountPct: v })} />
-                  <NumberInput label="Onboarding (€ one-time)" value={l.oneTimeOnboarding} onChange={(v: number) => updateLine(l.id, { oneTimeOnboarding: v })} />
+                  <NumberInput label="Unit MSRP (€ / mo)" value={l.unitMsrp} onChange={(v: number) => updateLine(l.id, { unitMsrp: v })} disabled={isLocked} />
+                  <NumberInput label="Reseller Margin (%)" value={l.resellerMarginPct} onChange={(v: number) => updateLine(l.id, { resellerMarginPct: v })} disabled={isLocked} />
+                  <NumberInput label="Line Discount (%)" value={l.customerDiscountPct} onChange={(v: number) => updateLine(l.id, { customerDiscountPct: v })} disabled={isLocked} />
+                  <NumberInput label="Onboarding (€ one-time)" value={l.oneTimeOnboarding} onChange={(v: number) => updateLine(l.id, { oneTimeOnboarding: v })} disabled={isLocked} />
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
@@ -295,8 +516,9 @@ export default function SolutionsCalculator() {
       {/* Totals */}
       <div className="bg-slate-900 text-white rounded-3xl p-8 shadow-2xl">
         <h3 className="text-xl font-black mb-6">Totals</h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
           <TotalCard label="Recurring Monthly" value={`€ ${pricing.recurringMonthly.toFixed(2)}`} />
+          <TotalCard label="Yearly" value={`€ ${pricing.yearly.toFixed(2)}`} />
           <TotalCard label="One-time (Onboarding)" value={`€ ${pricing.oneTime.toFixed(2)}`} />
           <TotalCard label={`Total Contract (${termMonths} mo)`} value={`€ ${pricing.tcv.toFixed(2)}`} highlight />
         </div>
@@ -309,7 +531,7 @@ export default function SolutionsCalculator() {
    UI helpers
 ====================== */
 
-function Select({ label, value, onChange, options }: any) {
+function Select({ label, value, onChange, options, disabled }: any) {
   const normalized = options.map((o: any) => (typeof o === 'object' ? o : { label: String(o), value: o }));
   return (
     <div>
@@ -321,7 +543,8 @@ function Select({ label, value, onChange, options }: any) {
           const num = Number(v);
           onChange(Number.isNaN(num) ? v : num);
         }}
-        className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-semibold"
+        disabled={disabled}
+        className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-semibold disabled:bg-slate-100"
       >
         {normalized.map((o: any) => (
           <option key={o.value} value={o.value}>{o.label}</option>
@@ -331,7 +554,7 @@ function Select({ label, value, onChange, options }: any) {
   );
 }
 
-function NumberInput({ label, value, onChange }: any) {
+function NumberInput({ label, value, onChange, disabled }: any) {
   return (
     <div>
       <label className="text-xs font-bold uppercase text-slate-500">{label}</label>
@@ -340,20 +563,22 @@ function NumberInput({ label, value, onChange }: any) {
         min={0}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-semibold"
+        disabled={disabled}
+        className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-semibold disabled:bg-slate-100"
       />
     </div>
   );
 }
 
-function TextInput({ label, value, onChange }: any) {
+function TextInput({ label, value, onChange, disabled }: any) {
   return (
     <div>
       <label className="text-xs font-bold uppercase text-slate-500">{label}</label>
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-semibold"
+        disabled={disabled}
+        className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-semibold disabled:bg-slate-100"
       />
     </div>
   );
