@@ -2,6 +2,8 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import './index.css'  // Add this at the top
+// ... rest of your code
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
