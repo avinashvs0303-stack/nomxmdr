@@ -11,6 +11,7 @@ import {
   Clock,
   Filter,
   Search,
+  Eye,
 } from 'lucide-react';
 
 export default function MyProposals() {
@@ -63,9 +64,8 @@ export default function MyProposals() {
       return;
     }
 
-    // 2️⃣ Create readable snapshot
-// 2️⃣ Create approval snapshot (full proposal data)
-const approvalSnapshot = proposal.data;
+    // 2️⃣ Create approval snapshot (full proposal data)
+    const approvalSnapshot = proposal.data;
 
     // 3️⃣ Freeze snapshot + update status
     const { error: updateError } = await supabase
@@ -97,6 +97,34 @@ const approvalSnapshot = proposal.data;
     }
 
     setProposals(prev => prev.filter(p => p.id !== id));
+  };
+
+  // Helper to get the correct edit URL for each calculator type
+  const getEditUrl = (proposal: PricingProposal) => {
+    switch (proposal.calculator_type) {
+      case 'defensive':
+        return `/defensive/pricing?proposalId=${proposal.id}`;
+      case 'exposure':
+        return `/defensive/exposure-management?proposalId=${proposal.id}`;
+      case 'solutions':
+        return `/defensive/solutions?proposalId=${proposal.id}`;
+      default:
+        return `/defensive/pricing?proposalId=${proposal.id}`;
+    }
+  };
+
+  // Helper to get calculator type display label
+  const getCalculatorLabel = (type: string) => {
+    switch (type) {
+      case 'defensive':
+        return 'MDR Pricing';
+      case 'exposure':
+        return 'Exposure Mgmt';
+      case 'solutions':
+        return 'Solutions';
+      default:
+        return type;
+    }
   };
 
   const normalized = searchTerm.trim().toLowerCase();
@@ -178,6 +206,7 @@ const approvalSnapshot = proposal.data;
               <thead>
                 <tr className="bg-slate-50/50 text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] border-b border-slate-100">
                   <th className="px-6 py-4">Client / ID</th>
+                  <th className="px-6 py-4">Calculator</th>
                   <th className="px-6 py-4">Service Package</th>
                   <th className="px-6 py-4 text-right">Value (Ann.)</th>
                   <th className="px-6 py-4">Status</th>
@@ -198,11 +227,15 @@ const approvalSnapshot = proposal.data;
                           className={`w-10 h-10 rounded-xl flex items-center justify-center ${
                             proposal.calculator_type === 'defensive'
                               ? 'bg-blue-100 text-blue-600'
+                              : proposal.calculator_type === 'exposure'
+                              ? 'bg-purple-100 text-purple-600'
                               : 'bg-slate-900 text-white'
                           }`}
                         >
                           {proposal.calculator_type === 'defensive' ? (
                             <Shield size={20} />
+                          ) : proposal.calculator_type === 'exposure' ? (
+                            <Eye size={20} />
                           ) : (
                             <Zap size={20} />
                           )}
@@ -213,13 +246,18 @@ const approvalSnapshot = proposal.data;
                             {proposal.data?.client?.name || '—'}
                           </p>
                           <p className="text-[10px] font-medium text-slate-400">
-                            ID: {proposal.id}
+                            ID: {proposal.id.slice(0, 8)}...
                           </p>
                         </div>
                       </div>
                     </td>
 
-                    {/* ✅ CHANGE: show human label if present */}
+                    <td className="px-6 py-4">
+                      <span className="text-xs font-bold text-slate-500 uppercase">
+                        {getCalculatorLabel(proposal.calculator_type)}
+                      </span>
+                    </td>
+
                     <td className="px-6 py-4">
                       <span className="text-sm font-medium text-slate-600">
                         {proposal.data?.service_package?.maturity_label || proposal.data?.maturity || '—'}
@@ -271,13 +309,7 @@ const approvalSnapshot = proposal.data;
                         )}
 
                         <Link
-                          to={
-                            proposal.calculator_type === 'defensive'
-                              ? `/defensive/pricing?proposalId=${proposal.id}`
-                              : proposal.calculator_type === 'exposure'
-                              ? `/defensive/exposure-management?proposalId=${proposal.id}`
-                              : `/defensive/solutions?proposalId=${proposal.id}`
-                          }
+                          to={getEditUrl(proposal)}
                           className="p-2 text-slate-400 hover:bg-slate-100 rounded-lg transition-all group-hover:text-slate-600 inline-flex"
                           title="Edit"
                         >
