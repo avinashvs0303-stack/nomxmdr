@@ -1,6 +1,8 @@
 import { useParams } from 'react-router-dom';
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../services/supabase';
+import { FileText, Download, Loader2 } from 'lucide-react';
+import { exportProposalToWord, ProposalData, ExportOptions } from '../services/proposalExportService';
 
 type ExportFormat = 'pdf' | 'docx';
 
@@ -8,12 +10,9 @@ function normalizeTier(v: any): string | null {
   if (typeof v !== 'string') return null;
   const s = v.trim();
   if (!s) return null;
-
-  // Handle "Core" -> "CORE", "Advance" -> "ADVANCE", etc.
   const up = s.toUpperCase();
   if (up === 'CORE' || up === 'ADVANCE' || up === 'ELITE') return up;
-
-  return s; // fallback (do not destroy unknown values)
+  return s;
 }
 
 function moneyEUR(n: any): string {
@@ -62,7 +61,6 @@ export default function ProposalViewer() {
         .order('created_at', { ascending: false });
 
       if (commentErr) {
-        // don't break viewer if comments table/policy is still being tuned
         console.warn('Failed to load comments:', commentErr);
         setComments([]);
       } else {
@@ -92,25 +90,21 @@ export default function ProposalViewer() {
   const viewData = useMemo(() => {
     if (!proposal) return null;
 
-    // Snapshot-first for pending/approved, fallback to data for draft or missing snapshot
-   const base =
-    proposal.approval_snapshot && proposal.status !== 'draft'
-      ? {
-          // start with full data (has line_items/maturity_summary)
-          ...(proposal.data || {}),
-          // overlay snapshot (approval “freeze” wins)
-          ...(proposal.approval_snapshot || {}),
-          // shallow-merge common nested objects so snapshot doesn't wipe data
-          pricing: { ...(proposal.data?.pricing || {}), ...(proposal.approval_snapshot?.pricing || {}) },
-          inputs: { ...(proposal.data?.inputs || {}), ...(proposal.approval_snapshot?.inputs || {}) },
-          onboarding: { ...(proposal.data?.onboarding || {}), ...(proposal.approval_snapshot?.onboarding || {}) },
-          service_package: {
-            ...(proposal.data?.service_package || {}),
-            ...(proposal.approval_snapshot?.service_package || {}),
-          },
-        }
-      : proposal.data;
-    // Normalize tier casing so UI doesn’t silently break when DB contains "Core"
+    const base =
+      proposal.approval_snapshot && proposal.status !== 'draft'
+        ? {
+            ...(proposal.data || {}),
+            ...(proposal.approval_snapshot || {}),
+            pricing: { ...(proposal.data?.pricing || {}), ...(proposal.approval_snapshot?.pricing || {}) },
+            inputs: { ...(proposal.data?.inputs || {}), ...(proposal.approval_snapshot?.inputs || {}) },
+            onboarding: { ...(proposal.data?.onboarding || {}), ...(proposal.approval_snapshot?.onboarding || {}) },
+            service_package: {
+              ...(proposal.data?.service_package || {}),
+              ...(proposal.approval_snapshot?.service_package || {}),
+            },
+          }
+        : proposal.data;
+
     const maturityNorm = normalizeTier(base?.maturity);
     const tierNorm = normalizeTier(base?.service_package?.tier);
 
@@ -124,60 +118,89 @@ export default function ProposalViewer() {
     };
   }, [proposal]);
 
+  /**
+   * Handle export to Word or PDF
+   */
   const handleExport = async (format: ExportFormat) => {
-    if (!proposal?.id) return;
+    if (!proposal?.id || !viewData) return;
     setExporting(format);
     setExportError(null);
 
     try {
-      /**
-       * ✅ Path A (recommended): Supabase Edge Function returns { url }
-       * - Create an edge function e.g. "export-proposal"
-       * - It generates PDF/DOCX and returns a signed URL
-       */
-      const fnName = 'export-proposal';
-      const { data, error } = await supabase.functions.invoke(fnName, {
-        body: { proposal_id: proposal.id, format },
-      });
+      if (format === 'docx') {
+        // Client-side Word export using proposalExportService
+        const proposalData: ProposalData = {
+          calculator: viewData.calculator,
+          client: viewData.client,
+          inputs: viewData.inputs,
+          addons: viewData.addons,
+          pricing: viewData.pricing,
+          maturity: viewData.maturity,
+          maturity_summary: viewData.maturity_summary,
+          line_items: viewData.line_items,
+          service_package: viewData.service_package,
+          onboarding: viewData.onboarding,
+        };
 
-      if (!error && data?.url) {
-        window.open(data.url, '_blank', 'noopener,noreferrer');
+        const exportOptions: ExportOptions = {
+          companyName: 'CompanyX',
+          companyTagline: 'Guardian xMDR',
+          proposalDate: new Date(proposal.created_at),
+        };
+
+        await exportProposalToWord(proposalData, exportOptions);
         setExporting(null);
         return;
       }
 
-      /**
-       * ✅ Path B (fallback): REST endpoint
-       * - /api/export/pdf/:id  and /api/export/docx/:id
-       */
-      const fallbackUrl =
-        format === 'pdf'
-          ? `/api/export/pdf/${proposal.id}`
-          : `/api/export/docx/${proposal.id}`;
+      if (format === 'pdf') {
+        // PDF export - try Edge Function first, then fallback
+        try {
+          const { data, error } = await supabase.functions.invoke('export-proposal', {
+            body: { proposal_id: proposal.id, format: 'pdf' },
+          });
 
-      // If function failed but endpoint exists, still works.
-      window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
-      setExporting(null);
+          if (!error && data?.url) {
+            window.open(data.url, '_blank', 'noopener,noreferrer');
+            setExporting(null);
+            return;
+          }
+        } catch (fnError) {
+          console.warn('Edge function not available, using fallback:', fnError);
+        }
+
+        // Fallback: Use REST endpoint
+        const fallbackUrl = `/api/export/pdf/${proposal.id}`;
+        window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+        setExporting(null);
+      }
     } catch (e: any) {
       console.error('Export failed:', e);
-      setExportError('Export failed. Check export function / endpoint.');
+      setExportError('Export failed. Please try again.');
       setExporting(null);
     }
   };
 
   if (loading) {
-    return <div className="text-slate-500">Loading proposal…</div>;
+    return (
+      <div className="flex items-center justify-center p-20">
+        <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+        <span className="ml-2 text-slate-500">Loading proposal…</span>
+      </div>
+    );
   }
 
   if (!proposal || !viewData) {
-    return <div className="text-red-500">Proposal not found</div>;
+    return (
+      <div className="p-8 text-center">
+        <FileText className="w-16 h-16 mx-auto text-slate-300 mb-4" />
+        <p className="text-red-500 font-medium">Proposal not found</p>
+      </div>
+    );
   }
 
   const d = viewData;
-
-  // Helpful fallbacks for missing fields (keeps UI stable)
   const clientName = d?.client?.name ?? null;
-
   const inputs = d?.inputs || {};
   const addons = Array.isArray(d?.addons) ? d.addons : [];
   const pricing = d?.pricing || {};
@@ -185,55 +208,79 @@ export default function ProposalViewer() {
   const sp = d?.service_package || {};
 
   return (
-    <div className="space-y-8">
+    <div className="max-w-4xl mx-auto space-y-8 pb-16">
       {/* HEADER */}
       <header className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold text-slate-900">
-            Proposal {proposal.id}
+            {clientName || 'Proposal'} - {sp?.maturity_label || sp?.tier || 'MDR'}
           </h1>
           <p className="text-slate-500 mt-1">
-            {proposal.calculator_type} • {sp?.maturity_label || '—'}
+            {proposal.calculator_type} • Created {new Date(proposal.created_at).toLocaleDateString()}
           </p>
-          <p className="text-xs text-slate-400 mt-1">
-            Status: <span className="font-medium">{proposal.status}</span>
-            {proposal.locked ? ' • Locked' : ''}
-            {typeof proposal.version === 'number' ? ` • v${proposal.version}` : ''}
-          </p>
+          <div className="flex items-center gap-2 mt-2">
+            <span
+              className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold uppercase tracking-widest ${
+                proposal.status === 'approved'
+                  ? 'bg-green-100 text-green-700'
+                  : proposal.status === 'pending_approval'
+                  ? 'bg-orange-100 text-orange-700'
+                  : 'bg-slate-100 text-slate-600'
+              }`}
+            >
+              {proposal.status.replace('_', ' ')}
+            </span>
+            {proposal.locked && (
+              <span className="text-xs text-slate-400">• Locked</span>
+            )}
+            {typeof proposal.version === 'number' && (
+              <span className="text-xs text-slate-400">• v{proposal.version}</span>
+            )}
+          </div>
 
           {exportError && (
             <p className="text-xs text-red-500 mt-2">{exportError}</p>
           )}
         </div>
 
-        {/* EXPORT (same minimal theme, no redesign) */}
+        {/* EXPORT BUTTONS */}
         <div className="flex gap-2">
-          <button
-            onClick={() => handleExport('pdf')}
-            disabled={exporting !== null}
-            className="px-3 py-1.5 text-sm border rounded-lg hover:bg-slate-50 disabled:opacity-60"
-          >
-            {exporting === 'pdf' ? 'Exporting…' : 'Export PDF'}
-          </button>
           <button
             onClick={() => handleExport('docx')}
             disabled={exporting !== null}
-            className="px-3 py-1.5 text-sm border rounded-lg hover:bg-slate-50 disabled:opacity-60"
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium border border-slate-200 rounded-xl hover:bg-slate-50 disabled:opacity-60 transition-colors"
           >
-            {exporting === 'docx' ? 'Exporting…' : 'Export DOCX'}
+            {exporting === 'docx' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download size={16} />
+            )}
+            {exporting === 'docx' ? 'Generating…' : 'Export Word'}
+          </button>
+          <button
+            onClick={() => handleExport('pdf')}
+            disabled={exporting !== null}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium border border-slate-200 rounded-xl hover:bg-slate-50 disabled:opacity-60 transition-colors"
+          >
+            {exporting === 'pdf' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download size={16} />
+            )}
+            {exporting === 'pdf' ? 'Generating…' : 'Export PDF'}
           </button>
         </div>
       </header>
 
       {/* CLIENT */}
       <section className="bg-white rounded-2xl border p-6">
-        <h3 className="font-bold mb-2">Client</h3>
-        <p>{clientName ? clientName : '—'}</p>
+        <h3 className="font-bold mb-2 text-slate-900">Client</h3>
+        <p className="text-slate-700">{clientName ? clientName : '—'}</p>
       </section>
 
       {/* SERVICE PACKAGE */}
       <section className="bg-white rounded-2xl border p-6">
-        <h3 className="font-bold mb-3">Service Package</h3>
+        <h3 className="font-bold mb-3 text-slate-900">Service Package</h3>
         <p className="text-slate-700 font-medium mb-3">
           {(sp?.tier || '—') as string} — {sp?.maturity_label || '—'}
         </p>
@@ -248,36 +295,38 @@ export default function ProposalViewer() {
           <p className="text-slate-500 text-sm">—</p>
         )}
       </section>
+
       {/* STRATEGIC MATURITY */}
       <section className="bg-white rounded-2xl border p-6">
-        <h3 className="font-bold mb-2">Strategic Maturity Level</h3>
+        <h3 className="font-bold mb-2 text-slate-900">Strategic Maturity Level</h3>
         <p className="text-lg font-semibold text-blue-600">
           {d?.maturity_summary?.level || '—'}
         </p>
       </section>
+
       {/* INPUTS */}
       <section className="bg-white rounded-2xl border p-6">
-        <h3 className="font-bold mb-3">Coverage Inputs</h3>
+        <h3 className="font-bold mb-3 text-slate-900">Coverage Inputs</h3>
         <div className="grid grid-cols-2 gap-4 text-sm">
           <div>
             <p className="text-slate-500">Endpoints</p>
-            <p className="font-medium">
+            <p className="font-medium text-slate-900">
               {typeof inputs.endpoints === 'number' ? inputs.endpoints : '—'}
             </p>
           </div>
           <div>
             <p className="text-slate-500">NDR IPs</p>
-            <p className="font-medium">
+            <p className="font-medium text-slate-900">
               {typeof inputs.ndrIps === 'number' ? inputs.ndrIps : '—'}
             </p>
           </div>
           <div>
             <p className="text-slate-500">SIEM Tier</p>
-            <p className="font-medium">{inputs.siemTier || '—'}</p>
+            <p className="font-medium text-slate-900">{inputs.siemTier || '—'}</p>
           </div>
           <div>
             <p className="text-slate-500">Contract Term</p>
-            <p className="font-medium">
+            <p className="font-medium text-slate-900">
               {inputs.contractTerm ? `${inputs.contractTerm} months` : '—'}
             </p>
           </div>
@@ -286,13 +335,13 @@ export default function ProposalViewer() {
 
       {/* ADD-ONS */}
       <section className="bg-white rounded-2xl border p-6">
-        <h3 className="font-bold mb-3">Add-ons</h3>
+        <h3 className="font-bold mb-3 text-slate-900">Add-ons</h3>
 
         {addons.length ? (
           <ul className="space-y-2 text-sm text-slate-600">
             {addons.map((addon: any) => (
               <li key={addon.id}>
-                • {addon.id} ({addon.days} days)
+                • {addon.name || addon.id} ({addon.days} days)
               </li>
             ))}
           </ul>
@@ -301,18 +350,18 @@ export default function ProposalViewer() {
         )}
       </section>
 
-      {/* PRICING (render ALL important fields from defensive pricing) */}
+      {/* PRICING */}
       <section className="bg-white rounded-2xl border p-6">
-        <h3 className="font-bold mb-3">Pricing</h3>
+        <h3 className="font-bold mb-3 text-slate-900">Pricing</h3>
 
         <div className="grid grid-cols-2 gap-4 text-sm">
           <div>
             <p className="text-slate-500">Base Monthly</p>
-            <p className="font-medium">{moneyEUR(pricing.baseMonthly)}</p>
+            <p className="font-medium text-slate-900">{moneyEUR(pricing.baseMonthly)}</p>
           </div>
           <div>
             <p className="text-slate-500">Discount</p>
-            <p className="font-medium">
+            <p className="font-medium text-slate-900">
               {pricing.termDiscount != null
                 ? `${Math.round(Number(pricing.termDiscount) * 100)}%`
                 : pricing.discount != null
@@ -322,63 +371,74 @@ export default function ProposalViewer() {
           </div>
           <div>
             <p className="text-slate-500">Monthly</p>
-            <p className="font-medium">{moneyEUR(pricing.monthly)}</p>
+            <p className="font-medium text-slate-900">{moneyEUR(pricing.monthly)}</p>
           </div>
           <div>
             <p className="text-slate-500">Yearly</p>
-            <p className="font-medium">{moneyEUR(pricing.yearly)}</p>
+            <p className="font-medium text-slate-900">{moneyEUR(pricing.yearly)}</p>
           </div>
           <div>
             <p className="text-slate-500">One-time</p>
-            <p className="font-medium">{moneyEUR(pricing.oneTime)}</p>
+            <p className="font-medium text-slate-900">{moneyEUR(pricing.oneTime)}</p>
           </div>
         </div>
-      </section>
-      {/* DETAILED LINE ITEMS */}
-<section className="bg-white rounded-2xl border p-6">
-  <h3 className="font-bold mb-4">Detailed Line-Item Cost Analysis</h3>
 
-  {Array.isArray(d?.line_items) && d.line_items.length ? (
-    <table className="w-full text-sm border">
-      <thead>
-        <tr className="bg-slate-50">
-          <th className="p-2 text-left">Category</th>
-          <th className="p-2 text-left">Description</th>
-          <th className="p-2 text-left">Metric</th>
-          <th className="p-2 text-right">Value</th>
-        </tr>
-      </thead>
-      <tbody>
-        {d.line_items.map((item: any, i: number) => (
-          <tr key={i} className="border-t">
-            <td className="p-2 font-medium">{item.category}</td>
-            <td className="p-2">
-              {Array.isArray(item.description)
-                ? item.description.map((x: string) => (
-                    <div key={x}>• {x}</div>
-                  ))
-                : item.description}
-            </td>
-            <td className="p-2">{item.metric || '—'}</td>
-            <td className="p-2 text-right">
-              {item.extended_monthly != null && moneyEUR(item.extended_monthly)}
-              {item.extended_onetime != null &&
-                `${moneyEUR(item.extended_onetime)} (One-Time)`}
-              {item.discount_percent != null &&
-                `-${Math.round(item.discount_percent * 100)}%`}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  ) : (
-    <p className="text-slate-500 text-sm">—</p>
-  )}
-</section>
+        {/* Total Contract Value */}
+        <div className="mt-6 p-4 bg-slate-900 rounded-xl text-white">
+          <p className="text-xs uppercase tracking-widest opacity-70 mb-1">Total Contract Value</p>
+          <p className="text-2xl font-bold">
+            {moneyEUR((pricing.monthly || 0) * (inputs.contractTerm || 12) + (pricing.oneTime || 0))}
+          </p>
+        </div>
+      </section>
+
+      {/* DETAILED LINE ITEMS */}
+      <section className="bg-white rounded-2xl border p-6">
+        <h3 className="font-bold mb-4 text-slate-900">Detailed Line-Item Cost Analysis</h3>
+
+        {Array.isArray(d?.line_items) && d.line_items.length ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm border border-slate-200 rounded-lg overflow-hidden">
+              <thead>
+                <tr className="bg-slate-50">
+                  <th className="p-3 text-left font-semibold text-slate-700">Category</th>
+                  <th className="p-3 text-left font-semibold text-slate-700">Description</th>
+                  <th className="p-3 text-left font-semibold text-slate-700">Metric</th>
+                  <th className="p-3 text-right font-semibold text-slate-700">Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.line_items.map((item: any, i: number) => (
+                  <tr key={i} className="border-t border-slate-100">
+                    <td className="p-3 font-medium text-slate-900">{item.category}</td>
+                    <td className="p-3 text-slate-600">
+                      {Array.isArray(item.description)
+                        ? item.description.map((x: string, j: number) => (
+                            <div key={j}>• {x}</div>
+                          ))
+                        : item.description}
+                    </td>
+                    <td className="p-3 text-slate-600">{item.metric || '—'}</td>
+                    <td className="p-3 text-right text-slate-900">
+                      {item.extended_monthly != null && moneyEUR(item.extended_monthly)}
+                      {item.extended_onetime != null &&
+                        `${moneyEUR(item.extended_onetime)} (One-Time)`}
+                      {item.discount_percent != null &&
+                        `-${Math.round(item.discount_percent * 100)}%`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="text-slate-500 text-sm">—</p>
+        )}
+      </section>
 
       {/* ONBOARDING */}
       <section className="bg-white rounded-2xl border p-6">
-        <h3 className="font-bold mb-3">Onboarding</h3>
+        <h3 className="font-bold mb-3 text-slate-900">Onboarding</h3>
 
         {Array.isArray(onboarding.steps) && onboarding.steps.length > 0 ? (
           <ul className="list-disc pl-6 space-y-1 text-sm text-slate-600">
@@ -392,22 +452,24 @@ export default function ProposalViewer() {
 
         <p className="mt-3 text-sm">
           <span className="text-slate-500">Onboarding Fee:</span>{' '}
-          <span className="font-medium">{moneyEUR(onboarding.fee)}</span>
+          <span className="font-medium text-slate-900">{moneyEUR(onboarding.fee)}</span>
         </p>
       </section>
 
       {/* APPROVAL COMMENTS */}
       <section className="bg-white rounded-2xl border p-6">
-        <h3 className="font-bold mb-3">Approval History</h3>
+        <h3 className="font-bold mb-3 text-slate-900">Approval History</h3>
 
         {comments.length === 0 ? (
           <p className="text-slate-500 text-sm">No approval comments</p>
         ) : (
-          <ul className="space-y-2 text-sm">
+          <ul className="space-y-3">
             {comments.map((c: any) => (
-              <li key={c.id}>
-                <span className="font-medium">Comment:</span>{' '}
-                {c.comment}
+              <li key={c.id} className="p-3 bg-slate-50 rounded-lg">
+                <p className="text-sm text-slate-700">{c.comment}</p>
+                <p className="text-xs text-slate-400 mt-1">
+                  {new Date(c.created_at).toLocaleDateString()} • {c.status_at_time}
+                </p>
               </li>
             ))}
           </ul>
@@ -416,7 +478,7 @@ export default function ProposalViewer() {
 
       {/* VERSION CONTEXT */}
       <section className="bg-slate-50 rounded-2xl border p-6">
-        <h3 className="font-bold mb-3">Version History</h3>
+        <h3 className="font-bold mb-3 text-slate-900">Version History</h3>
         <p className="text-sm text-slate-600">
           {versions.length} version{versions.length === 1 ? '' : 's'} recorded
         </p>
