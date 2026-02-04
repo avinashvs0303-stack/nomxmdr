@@ -26,6 +26,7 @@ import AdminUsers from './pages/AdminUsers';
 import AdminProposals from './pages/AdminProposals';
 import ExposureManagementPricing from './pages/ExposureManagementPricing';
 import AdminApprovals from './pages/AdminApprovals';
+import SOCOverview from './pages/SOCOverview';
 
 
 const Layout = ({
@@ -49,15 +50,16 @@ const Layout = ({
   };
 
   const menuItems = [
-    {
-      section: 'Defensive Security',
-      items: [
-        { name: 'Pricing Calculator', path: '/defensive/pricing', icon: <Calculator size={18} /> },
-        { name: 'Exposure Management', path: '/defensive/exposure-management', icon: <ShieldAlert size={18} /> },
-        { name: 'Solutions Calculator', path: '/defensive/solutions', icon: <Info size={18} /> },
-        { name: 'Service Packages', path: '/defensive/packages', icon: <Briefcase size={18} /> }
-      ]
-    },
+{
+  section: 'Defensive Security',
+  items: [
+    { name: 'SOC Overview', path: '/soc-overview', icon: <ShieldCheck size={18} /> },
+    { name: 'Pricing Calculator', path: '/defensive/pricing', icon: <Calculator size={18} /> },
+    { name: 'Exposure Management', path: '/defensive/exposure-management', icon: <ShieldAlert size={18} /> },
+    { name: 'Solutions Calculator', path: '/defensive/solutions', icon: <Info size={18} /> },
+    { name: 'Service Packages', path: '/defensive/packages', icon: <Briefcase size={18} /> }
+  ]
+},
     {
       section: 'Offensive Security',
       items: [
@@ -248,6 +250,7 @@ export default function App() {
           <Route path="/advisory/news" element={<SecurityNews />} />
           <Route path="/advisory/sar" element={<GenerateSAR />} />
           <Route path="/my-proposals" element={<MyProposals />} />
+          <Route path="/soc-overview" element={<SOCOverview />} />
           <Route path="/admin/users" element={<AdminUsers />} />
           <Route path="/admin/proposals" element={<AdminProposals />} />
           <Route path="*" element={<Navigate to="/defensive/pricing" />} />
