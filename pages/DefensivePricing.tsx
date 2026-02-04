@@ -16,11 +16,13 @@ import {
   Layers,
   PlayCircle,
   Lock,
+  Loader2,
 } from 'lucide-react';
 import { SecurityPackage } from '../types';
 import { supabase } from '../services/supabase';
 import { MDR_SERVICE_PACKAGES } from './mdrServicePackages';
 import { useSearchParams } from 'react-router-dom';
+import { exportProposalToWord, ProposalData, ExportOptions } from '../services/proposalExportService';
 
 /* =========================
    TYPES & CONSTANTS
@@ -105,6 +107,7 @@ export default function DefensivePricing() {
   const [contractTerm, setContractTerm] = useState<12 | 36 | 60>(12);
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<'docx' | 'pdf' | null>(null);
 
   /* =========================
      LOAD EXISTING (EDIT MODE)
@@ -158,10 +161,10 @@ export default function DefensivePricing() {
      CALCULATIONS
   ========================= */
 
-  const totals = useMemo(() => {
-    const pkg = PACKAGES[selectedPkg];
-    const siem = SIEM_TIERS.find(t => t.id === siemTier);
+  const pkg = PACKAGES[selectedPkg];
+  const siem = SIEM_TIERS.find(t => t.id === siemTier);
 
+  const totals = useMemo(() => {
     const baseMonthly =
       pkg.base +
       endpoints * pkg.perEndpoint +
@@ -183,7 +186,7 @@ export default function DefensivePricing() {
       oneTime: totalOneTime,
       termDiscount,
     };
-  }, [selectedPkg, endpoints, ndrIps, siemTier, selectedAddons, addonDays, contractTerm]);
+  }, [selectedPkg, endpoints, ndrIps, siemTier, selectedAddons, addonDays, contractTerm, pkg, siem]);
 
   /* =========================
      ACTIONS
@@ -200,72 +203,72 @@ export default function DefensivePricing() {
   };
 
   const buildLineItems = () => {
-  const items: any[] = [];
+    const items: any[] = [];
 
-  items.push({
-    category: 'Service Tier',
-    description: `${selectedPkg} Managed MDR`,
-    metric: '1 Base Platform',
-    unit_price: pkg.base,
-    extended_monthly: pkg.base,
-    billing: 'monthly',
-  });
-
-  items.push({
-    category: 'Endpoints',
-    description: 'Managed Identities & Devices',
-    metric: `${endpoints} Units`,
-    unit_price: pkg.perEndpoint,
-    extended_monthly: endpoints * pkg.perEndpoint,
-    billing: 'monthly',
-  });
-
-  items.push({
-    category: 'NDR Visibility',
-    description: 'IP Network Detection Nodes',
-    metric: `${ndrIps} Units`,
-    unit_price: pkg.perNdrIp,
-    extended_monthly: ndrIps * pkg.perNdrIp,
-    billing: 'monthly',
-  });
-
-  if (siem?.price) {
     items.push({
-      category: 'SIEM Tier',
-      description: siem.name,
-      metric: '1 Logic Bundle',
-      unit_price: siem.price,
-      extended_monthly: siem.price,
+      category: 'Service Tier',
+      description: `${selectedPkg} Managed MDR`,
+      metric: '1 Base Platform',
+      unit_price: pkg.base,
+      extended_monthly: pkg.base,
       billing: 'monthly',
     });
-  }
 
-  if (selectedAddons.length) {
     items.push({
-      category: 'Professional Services',
-      description: selectedAddons.map(id => {
-        const a = ADDONS.find(x => x.id === id);
-        return `${a?.name} (${addonDays[id] || 1} Days)`;
-      }),
-      metric: '€1,250 / Day',
-      unit_price: 1250,
-      extended_onetime: selectedAddons.reduce(
-        (s, id) => s + (addonDays[id] || 1) * 1250,
-        0
-      ),
-      billing: 'one_time',
+      category: 'Endpoints',
+      description: 'Managed Identities & Devices',
+      metric: `${endpoints} Units`,
+      unit_price: pkg.perEndpoint,
+      extended_monthly: endpoints * pkg.perEndpoint,
+      billing: 'monthly',
     });
-  }
 
-  items.push({
-    category: 'Contractual Adjustments',
-    description: `${contractTerm} Month Commitment Discount`,
-    discount_percent: totals.termDiscount,
-    billing: 'discount',
-  });
+    items.push({
+      category: 'NDR Visibility',
+      description: 'IP Network Detection Nodes',
+      metric: `${ndrIps} Units`,
+      unit_price: pkg.perNdrIp,
+      extended_monthly: ndrIps * pkg.perNdrIp,
+      billing: 'monthly',
+    });
 
-  return items;
-};
+    if (siem?.price) {
+      items.push({
+        category: 'SIEM Tier',
+        description: siem.name,
+        metric: '1 Logic Bundle',
+        unit_price: siem.price,
+        extended_monthly: siem.price,
+        billing: 'monthly',
+      });
+    }
+
+    if (selectedAddons.length) {
+      items.push({
+        category: 'Professional Services',
+        description: selectedAddons.map(id => {
+          const a = ADDONS.find(x => x.id === id);
+          return `${a?.name} (${addonDays[id] || 1} Days)`;
+        }),
+        metric: '€1,250 / Day',
+        unit_price: 1250,
+        extended_onetime: selectedAddons.reduce(
+          (s, id) => s + (addonDays[id] || 1) * 1250,
+          0
+        ),
+        billing: 'one_time',
+      });
+    }
+
+    items.push({
+      category: 'Contractual Adjustments',
+      description: `${contractTerm} Month Commitment Discount`,
+      discount_percent: totals.termDiscount,
+      billing: 'discount',
+    });
+
+    return items;
+  };
 
   const handleSave = async () => {
     if (isLocked) return;
@@ -287,25 +290,21 @@ export default function DefensivePricing() {
       inputs: { endpoints, ndrIps, siemTier, contractTerm },
       addons: selectedAddons.map(id => ({
         id,
+        name: ADDONS.find(a => a.id === id)?.name || id,
         days: addonDays[id] || 1,
       })),
       pricing: totals,
-
       maturity: selectedPkg,
-       // ✅ ADD THIS
       maturity_summary: {
         level: PACKAGES[selectedPkg].maturity,
         tier: selectedPkg,
       },
-
-      // ✅ ADD THIS
       line_items: buildLineItems(),
       service_package: {
         tier: selectedPkg,
-        maturity_label: servicePackage.maturityLabel,
-        inclusions: servicePackage.inclusions,
+        maturity_label: servicePackage?.maturityLabel || selectedPkg,
+        inclusions: servicePackage?.inclusions || [],
       },
-
       onboarding: {
         steps: ['Kick-off', 'Integration', 'Tuning', 'Validation', 'Go Live'],
         fee: PACKAGES[selectedPkg].onboarding,
@@ -315,18 +314,15 @@ export default function DefensivePricing() {
     let error: any = null;
 
     if (existingProposalId) {
-      // update existing draft
       const resp = await supabase
         .from('proposals')
         .update({
           data: payloadData,
-          // status NOT changed here
         })
         .eq('id', existingProposalId);
 
       error = resp.error;
     } else {
-      // create new draft
       const proposalId = crypto.randomUUID();
       const resp = await supabase.from('proposals').insert([{
         id: proposalId,
@@ -352,8 +348,66 @@ export default function DefensivePricing() {
     setTimeout(() => setSaveStatus(null), 3000);
   };
 
-  const pkg = PACKAGES[selectedPkg];
-  const siem = SIEM_TIERS.find(t => t.id === siemTier);
+  /* =========================
+     EXPORT TO WORD
+  ========================= */
+
+  const handleExportToWord = async () => {
+    setExporting('docx');
+
+    try {
+      const servicePackage = MDR_SERVICE_PACKAGES[selectedPkg];
+
+      const proposalData: ProposalData = {
+        calculator: 'defensive_pricing',
+        client: { name: client || 'Draft Proposal' },
+        inputs: {
+          endpoints,
+          ndrIps,
+          siemTier,
+          contractTerm,
+        },
+        addons: selectedAddons.map(id => {
+          const addon = ADDONS.find(a => a.id === id);
+          return {
+            id,
+            name: addon?.name || id,
+            days: addonDays[id] || 1,
+            description: addon?.description,
+          };
+        }),
+        pricing: totals,
+        maturity: selectedPkg,
+        maturity_summary: {
+          level: PACKAGES[selectedPkg].maturity,
+          tier: selectedPkg,
+        },
+        line_items: buildLineItems(),
+        service_package: {
+          tier: selectedPkg,
+          maturity_label: servicePackage?.maturityLabel || selectedPkg,
+          inclusions: servicePackage?.inclusions || [],
+        },
+        onboarding: {
+          steps: ['Kick-off', 'Integration', 'Tuning', 'Validation', 'Go Live'],
+          fee: PACKAGES[selectedPkg].onboarding,
+        },
+      };
+
+      const exportOptions: ExportOptions = {
+        companyName: 'CompanyX',
+        companyTagline: 'Guardian xMDR',
+        proposalDate: new Date(),
+      };
+
+      await exportProposalToWord(proposalData, exportOptions);
+    } catch (error) {
+      console.error('Export failed:', error);
+      alert('Failed to export proposal. Please try again.');
+    } finally {
+      setExporting(null);
+    }
+  };
 
   return (
     <div className="space-y-6 pb-12">
@@ -368,8 +422,22 @@ export default function DefensivePricing() {
         </div>
 
         <div className="flex gap-2">
-          <button className="flex items-center gap-1.5 bg-white text-slate-700 px-3 py-1.5 rounded-lg border border-slate-200 text-[10px] font-black uppercase tracking-widest shadow-sm hover:bg-slate-50 transition-all">
-            <FileDown size={14} /> Export
+          <button
+            onClick={handleExportToWord}
+            disabled={exporting !== null}
+            className="flex items-center gap-1.5 bg-white text-slate-700 px-3 py-1.5 rounded-lg border border-slate-200 text-[10px] font-black uppercase tracking-widest shadow-sm hover:bg-slate-50 transition-all disabled:opacity-60"
+          >
+            {exporting === 'docx' ? (
+              <>
+                <Loader2 size={14} className="animate-spin" />
+                Exporting...
+              </>
+            ) : (
+              <>
+                <FileDown size={14} />
+                Export Proposal
+              </>
+            )}
           </button>
           <button
             onClick={handleSave}
