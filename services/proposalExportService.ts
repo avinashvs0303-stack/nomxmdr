@@ -1613,7 +1613,15 @@ export async function exportProposalToWord(
   const date = formatDate(options.proposalDate || new Date()).replace(/\s/g, '_');
   const filename = `${clientName.replace(/\s/g, '_')}_Proposal_${date}.docx`;
 
-  saveAs(blob, filename);
+  // Native browser download
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
 
 /**
