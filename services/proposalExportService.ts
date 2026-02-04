@@ -28,7 +28,6 @@ import {
   PageNumber,
   LevelFormat,
 } from 'docx';
-import saveAs from 'file-saver';
 
 /* ======================
    TYPES
@@ -1604,16 +1603,12 @@ export async function exportProposalToWord(
   options: ExportOptions = {}
 ): Promise<void> {
   const doc = await generateProposalDocument(data, options);
-  const buffer = await Packer.toBuffer(doc);
-  const blob = new Blob([buffer], {
-    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  });
+  const blob = await Packer.toBlob(doc);
 
   const clientName = data.client?.name || 'Proposal';
   const date = formatDate(options.proposalDate || new Date()).replace(/\s/g, '_');
   const filename = `${clientName.replace(/\s/g, '_')}_Proposal_${date}.docx`;
 
-  // Native browser download
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -1632,8 +1627,5 @@ export async function exportProposalToWordBlob(
   options: ExportOptions = {}
 ): Promise<Blob> {
   const doc = await generateProposalDocument(data, options);
-  const buffer = await Packer.toBuffer(doc);
-  return new Blob([buffer], {
-    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  });
+  return await Packer.toBlob(doc);
 }
